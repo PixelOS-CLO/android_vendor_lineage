@@ -1022,3 +1022,18 @@ function build_kernel() {
     chmod -x "${target_kernel_dir}/"*
     echo "Kernel build output copied to ${target_kernel_dir}/"
 }
+
+function clodiff()
+{
+    target_branch=$1
+    set_stuff_for_environment
+    T=$(gettop)
+    python3 $T/vendor/lineage/build/tools/diff-clo.py $target_branch
+}
+
+function clomerge()
+{
+    set_stuff_for_environment
+    local T=$(gettop)
+    python3 "$T/vendor/lineage/build/tools/merge-clo.py" "$@"
+}
