@@ -24,6 +24,8 @@
 #
 #   TARGET_KERNEL_CLANG_VERSION        = Clang prebuilts version, optional, defaults to clang-stable
 #   TARGET_KERNEL_CLANG_PATH           = Clang prebuilts path, optional
+#   TARGET_KERNEL_LIBCLANG_PATH        = libclang (used by rust bindgen) path, optional,
+#                                          defaults to $(TARGET_KERNEL_CLANG_PATH)/lib
 #
 #   TARGET_KERNEL_LIBC_SYSROOT_USE     = libc sysroot to use, defaults to "host" for 6.11+
 #
@@ -43,8 +45,12 @@
 #                                          Defaults to empty
 #   TARGET_KERNEL_EXT_MODULES          = Optional, the external modules we are
 #                                          building. Defaults to empty
+#   TARGET_KERNEL_UNSAFE_DDK_HEADERS   = Specifies if bazel build should use unsafe headers for DDK
+#                                        modules, this defaults to empty and should only be set to
+#                                        true if no other choice.
 #
 #   USE_CCACHE                         = Enable ccache (global Android flag)
+#   USE_RBE                            = Enable RBE (global Android flag)
 
 include vendor/lineage/build/core/utils.mk
 
@@ -86,6 +92,19 @@ else
 endif
 TARGET_KERNEL_CLANG_PATH ?= $(BUILD_TOP)/prebuilts/clang/host/$(HOST_PREBUILT_TAG)/$(KERNEL_CLANG_VERSION)
 
+# Some libclang releases silently generate incomplete Rust records. Probe once
+# for Rust-enabled kernels rather than maintaining a toolchain denylist.
+ifeq ($(TARGET_KERNEL_LIBCLANG_PATH),)
+    ifneq ($(wildcard $(TARGET_KERNEL_SOURCE)/rust/bindings/bindings_helper.h),)
+        TARGET_KERNEL_LIBCLANG_PATH := $(shell $(BUILD_TOP)/vendor/lineage/build/tools/select_kernel_libclang.sh \
+            $(BUILD_TOP)/prebuilts/clang-tools/$(HOST_PREBUILT_TAG)/bin/bindgen \
+            $(TARGET_KERNEL_CLANG_PATH) \
+            $(BUILD_TOP)/prebuilts/clang/host/$(HOST_PREBUILT_TAG))
+    else
+        TARGET_KERNEL_LIBCLANG_PATH := $(TARGET_KERNEL_CLANG_PATH)/lib
+    endif
+endif
+
 TARGET_KERNEL_RUST_VERSION ?= $(RUST_AOSP_PREBUILTS_VERSION)
 
 ifneq ($(USE_CCACHE),)
@@ -95,8 +114,37 @@ ifneq ($(USE_CCACHE),)
     endif
 endif
 
-# Clear this first to prevent accidental poisoning from env
+# build/make/core/rbe.mk is only read while dumping the product config, so the
+# rewrapper flags have to be recreated here
+KERNEL_RBE_WRAPPER :=
+ifneq ($(filter-out false,$(USE_REWRAPPER)),)
+    # An out dir outside of the tree can't be a remote input or output
+    ifneq ($(filter $(BUILD_TOP)/%,$(abspath $(OUT_DIR))),)
+        KERNEL_RBE_WRAPPER := $(abspath $(if $(RBE_DIR),$(RBE_DIR),prebuilts/remoteexecution-client/live))/rewrapper
+        KERNEL_RBE_WRAPPER += --labels=type=compile,lang=cpp,compiler=clang
+        KERNEL_RBE_WRAPPER += --env_var_allowlist=PWD
+        KERNEL_RBE_WRAPPER += --exec_strategy=$(if $(RBE_CXX_EXEC_STRATEGY),$(RBE_CXX_EXEC_STRATEGY),local)
+        KERNEL_RBE_WRAPPER += --compare=$(if $(RBE_CXX_COMPARE),$(RBE_CXX_COMPARE),false)
+        ifneq ($(RBE_platform),)
+            KERNEL_RBE_WRAPPER += --platform=$(RBE_platform),Pool=$(if $(RBE_CXX_POOL),$(RBE_CXX_POOL),default)
+        endif
+    endif
+endif
+
+# ccache can't cache anything behind another wrapper, so it gives way to RBE
+ifneq ($(KERNEL_RBE_WRAPPER),)
+    KERNEL_CC_WRAPPER := $(BUILD_TOP)/vendor/lineage/build/tools/kernel_rbe_cc.sh
+else
+    KERNEL_CC_WRAPPER := $(CCACHE_BIN)
+endif
+
+# Clear these first to prevent accidental poisoning from env
+KERNEL_BAZEL_FLAGS :=
 KERNEL_MAKE_FLAGS :=
+
+ifeq ($(TARGET_KERNEL_UNSAFE_DDK_HEADERS),true)
+    KERNEL_BAZEL_FLAGS += --//build/kernel/kleaf:allow_ddk_unsafe_headers
+endif
 
 # Add back threads, ninja cuts this to $(getconf _NPROCESSORS_ONLN)/2
 KERNEL_MAKE_FLAGS += -j$(shell getconf _NPROCESSORS_ONLN)
@@ -113,7 +161,7 @@ endif
 KERNEL_MAKE_FLAGS += HOSTCFLAGS="$(KERNEL_HOST_C_LD_FLAGS_SYSROOT) -I$(BUILD_TOP)/prebuilts/kernel-build-tools/linux-x86/include"
 KERNEL_MAKE_FLAGS += HOSTLDFLAGS="$(KERNEL_HOST_C_LD_FLAGS_SYSROOT) -Wl,-rpath,$(BUILD_TOP)/prebuilts/kernel-build-tools/linux-x86/lib64 -L $(BUILD_TOP)/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt"
 
-TOOLS_PATH_OVERRIDE += PATH=$(BUILD_TOP)/prebuilts/tools-lineage/$(HOST_PREBUILT_TAG)/bin:$(TARGET_KERNEL_CLANG_PATH)/bin:$(BUILD_TOP)/prebuilts/rust-toolchain/$(HOST_PREBUILT_TAG)/$(TARGET_KERNEL_RUST_VERSION)/bin:$(BUILD_TOP)/prebuilts/clang-tools/$(HOST_PREBUILT_TAG)/bin:$$PATH
+TOOLS_PATH_OVERRIDE += PATH=$(BUILD_TOP)/prebuilts/tools-lineage/$(HOST_PREBUILT_TAG)/bin:$(BUILD_TOP)/prebuilts/build-tools/$(HOST_PREBUILT_TAG)/bin:$(TARGET_KERNEL_CLANG_PATH)/bin:$(BUILD_TOP)/prebuilts/rust-toolchain/$(HOST_PREBUILT_TAG)/$(TARGET_KERNEL_RUST_VERSION)/bin:$(BUILD_TOP)/prebuilts/clang-tools/$(HOST_PREBUILT_TAG)/bin:$$PATH
 
 # Set DTBO image locations so the build system knows to build them
 ifneq (,$(filter true, $(TARGET_NEEDS_DTBOIMAGE) $(BOARD_KERNEL_SEPARATED_DTBO)))
@@ -147,8 +195,8 @@ TOOLS_PATH_OVERRIDE += BISON_PKGDATADIR=$(BUILD_TOP)/prebuilts/build-tools/commo
 # Since Linux 5.10, pahole is required
 KERNEL_MAKE_FLAGS += PAHOLE=$(BUILD_TOP)/prebuilts/kernel-build-tools/linux-x86/bin/pahole
 
-# Rust bindgen wants matching Clang and libclang versions
-KERNEL_MAKE_FLAGS += LIBCLANG_PATH=$(TARGET_KERNEL_CLANG_PATH)/lib
+# Tell rust bindgen which libclang to parse the kernel headers with
+KERNEL_MAKE_FLAGS += LIBCLANG_PATH=$(TARGET_KERNEL_LIBCLANG_PATH)
 
 # AutoFDO
 # Ideally, we also want to detect 'CONFIG_AUTOFDO_CLANG=y' from kernel configs...

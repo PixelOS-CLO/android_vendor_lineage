@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2020 The LineageOS Project
+# Copyright (C) 2023-2025 The LineageOS Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,18 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-TARGET_SUPPORTS_32_BIT_APPS := true
+ifdef MANIFEST_EXCLUDES
+MANIFEST_EXCLUDES := |$(MANIFEST_EXCLUDES)
+endif
 
-$(call inherit-product, device/generic/common/gsi_arm.mk)
+$(INSTALLED_BUILD_MANIFEST_XML_TARGET):
+	mkdir -p $(dir $@)
+	REPO_TRACE=0 python3 .repo/repo/repo manifest -o - -r | grep -Ev "proprietary_$(MANIFEST_EXCLUDES)" > $@
 
-$(call inherit-product, $(SRC_TARGET_DIR)/product/full_base_telephony.mk)
-
-include vendor/lineage/build/target/product/lineage_generic_target.mk
-
-PRODUCT_USE_DYNAMIC_PARTITION_SIZE := true
-
-TARGET_NO_KERNEL_OVERRIDE := true
-
-PRODUCT_NAME := lineage_gsi_arm
-
-PRODUCT_ENFORCE_ARTIFACT_PATH_REQUIREMENTS :=
+.PHONY: build-manifest.xml
+build-manifest.xml: $(INSTALLED_BUILD_MANIFEST_XML_TARGET)

@@ -262,11 +262,17 @@ endif
 PATH_OVERRIDE += LD_LIBRARY_PATH=$(TARGET_KERNEL_CLANG_PATH)/lib64:$$LD_LIBRARY_PATH
 PATH_OVERRIDE += PATH=$(TARGET_KERNEL_CLANG_PATH)/bin:$$PATH
 ifeq ($(KERNEL_CC),)
-    KERNEL_CC := CC="$(CCACHE_BIN) clang" LD=ld.lld
+    KERNEL_CC := CC="$(KERNEL_CC_WRAPPER) clang" LD=ld.lld
 endif
 
 # System tools are no longer allowed on 10+
 PATH_OVERRIDE += $(TOOLS_PATH_OVERRIDE)
+
+ifneq ($(KERNEL_RBE_WRAPPER),)
+    # The kernel is built from KERNEL_OUT, not from the top of the tree
+    PATH_OVERRIDE += RBE_exec_root=$(BUILD_TOP)
+    PATH_OVERRIDE += KERNEL_RBE_WRAPPER="$(KERNEL_RBE_WRAPPER)"
+endif
 
 ifneq (,$(filter true, $(TARGET_NEEDS_DTBOIMAGE) $(BOARD_KERNEL_SEPARATED_DTBO)))
     KERNEL_MAKE_FLAGS += DTC_EXT=$(KERNEL_BUILD_OUT_PREFIX)$(DTC)
@@ -294,7 +300,7 @@ endef
 # Make an external module target using kbuild
 # $(1): module name
 # $(2): module root path relative to kernel source
-# $(2): target to build (eg. modules_install)
+# $(3): target to build (eg. modules_install)
 define make-kbuild-module-target
 $(PATH_OVERRIDE) $(KERNEL_MAKE_CMD) $(KERNEL_MAKE_FLAGS) -C $(BUILD_TOP)/$(KERNEL_SRC) M=$(2)/$(1) O=$(KERNEL_BUILD_OUT_PREFIX)$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) $(3)
 endef
@@ -743,6 +749,7 @@ endif # FULL_KERNEL_BUILD
 
 ifneq ($(TARGET_KERNEL_PLATFORM_TARGET),)
 KERNEL_PATH := $(abspath $(BUILD_TOP)/kernel/platform/kernel-$(TARGET_KERNEL_VERSION))
+KERNEL_BAZEL_OUT := $(TARGET_OUT_INTERMEDIATES)/KERNEL_BAZEL_OUT
 
 ifeq ($(call is-version-lower-or-equal,$(TARGET_KERNEL_VERSION),6.1),true)
 KERNEL_REPO_MANIFEST := $(abspath $(KERNEL_OUT)/manifest.xml)
@@ -752,26 +759,21 @@ endif
 
 $(TARGET_PREBUILT_INT_KERNEL): $(DEPMOD) $(KERNEL_MODULES_PARTITION_FILE_LIST) $(SYSTEM_KERNEL_MODULES_PARTITION_FILE_LIST)
 	@echo "Building $(BOARD_KERNEL_IMAGE_NAME)"
-	@mkdir -p $(KERNEL_OUT)
-	$(hide) cd $(KERNEL_PATH) && \
-		python3 $(BUILD_TOP)/.repo/repo/repo manifest -o - -r \
-		| awk -v pat="kernel/platform/kernel-$(TARGET_KERNEL_VERSION)" ' \
-			/^  <project.*\/>$$/    { if (index($$0, pat)) { gsub(pat "/", ""); print }; next } \
-			/^  <project/          { keep = index($$0, pat) > 0; if (keep) { gsub(pat "/", ""); print }; buf = 1; next } \
-			buf && /  <\/project>/ { if (keep) { gsub(pat "/", ""); print }; buf = 0; next } \
-			buf                    { if (keep) { gsub(pat "/", ""); print }; next } \
-			                       { print } \
-		' \
+	$(hide) rm -rf $(KERNEL_OUT)
+	@mkdir -p $(KERNEL_OUT) $(KERNEL_BAZEL_OUT)
+	$(hide) cd $(BUILD_TOP) && \
+		python3 vendor/lineage/build/tools/kernel_kleaf_manifest.py $(TARGET_KERNEL_VERSION) \
 		> $(abspath $(KERNEL_OUT))/manifest.xml
 	$(hide) cd $(KERNEL_PATH) && \
 		./tools/bazel \
-			--output_user_root=$(abspath $(KERNEL_OUT)/bazel-out) \
-			--output_root=$(abspath $(KERNEL_OUT)/bazel-out) \
+			--output_user_root=$(abspath $(KERNEL_BAZEL_OUT)) \
+			--output_root=$(abspath $(KERNEL_BAZEL_OUT)) \
 			run \
 			--experimental_convenience_symlinks=ignore \
 			--cpu=$(KERNEL_ARCH) \
 			--repo_manifest $(KERNEL_REPO_MANIFEST) \
 			--config=stamp \
+			$(KERNEL_BAZEL_FLAGS) \
 			//$(KERNEL_SRC):$(TARGET_KERNEL_PLATFORM_TARGET)_dist \
 			-- --destdir=$(abspath $(KERNEL_OUT))
 	$(if $(BOOT_KERNEL_MODULES),\
@@ -782,7 +784,7 @@ $(TARGET_PREBUILT_INT_KERNEL): $(DEPMOD) $(KERNEL_MODULES_PARTITION_FILE_LIST) $
 	)
 	$(if $(filter $(TARGET_KERNEL_MIXED_MODE),true),\
 		system_dlkm_modules=$$(awk -F'/' '{ print "$(KERNEL_OUT)/"$$NF }' $(KERNEL_OUT)/system_dlkm.modules.load); \
-		($(call build-image-kernel-modules-lineage,$$system_dlkm_modules,$(SYSTEM_KERNEL_MODULES_OUT),$(SYSTEM_KERNEL_MODULE_MOUNTPOINT)/,$(SYSTEM_KERNEL_DEPMOD_STAGING_DIR),,,$(SYSTEM_KERNEL_MODULES_PARTITION_FILE_LIST),))\
+		($(call build-image-kernel-modules-lineage,$$system_dlkm_modules,$(SYSTEM_KERNEL_MODULES_OUT),$(SYSTEM_KERNEL_MODULE_MOUNTPOINT)/,$(SYSTEM_KERNEL_DEPMOD_STAGING_DIR),$(SYSTEM_KERNEL_MODULES_LOAD),,$(SYSTEM_KERNEL_MODULES_PARTITION_FILE_LIST),))\
 	)
 	vendor_modules=$$(comm -23 <(find $(KERNEL_OUT) -maxdepth 1 -type f -name '*.ko' | awk -F'/' '{ print $$NF }' | sort) <(awk -F'/' '{ print $$NF }' $(KERNEL_OUT)/system_dlkm.modules.load | sort) | sed 's|^|$(KERNEL_OUT)/|'); \
 	($(call build-image-kernel-modules-lineage,$$vendor_modules,$(KERNEL_MODULES_OUT),$(KERNEL_MODULE_MOUNTPOINT)/,$(KERNEL_DEPMOD_STAGING_DIR),$(BOARD_VENDOR_KERNEL_MODULES_LOAD),,$(KERNEL_MODULES_PARTITION_FILE_LIST),$(SYSTEM_KERNEL_DEPMOD_STAGING_DIR)/lib/modules/0.0/$(SYSTEM_KERNEL_MODULE_MOUNTPOINT)))
